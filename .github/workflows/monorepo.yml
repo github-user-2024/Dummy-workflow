@@ -1,0 +1,96 @@
+name: Deploy Microservice
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment Environment (DEV or INT)'
+        required: true
+        default: 'DEV'
+        type: choice
+        options:
+          - DEV
+          - INT
+      microservice:
+        description: 'Name of the microservice to deploy'
+        required: true
+        default: 'user-service'
+        type: choice
+        options:
+          - user-service
+          - order-service
+          - payment-service
+          - inventory-service
+          - notification-service
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }} # Deployment environment (DEV or INT)
+
+    steps:
+    # 1. Checkout the repository
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    # 2. Set up AWS CLI for EKS Authentication
+    - name: Set up AWS CLI
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    # 3. Set up Docker Buildx
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    # 4. Set up Kubernetes tools (kubectl, kustomize)
+    - name: Set up kubectl and kustomize
+      run: |
+        wget https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v4.0.5/kustomize_4.0.5_linux_amd64.tar.gz
+        tar xzf kustomize_4.0.5_linux_amd64.tar.gz
+        sudo mv kustomize /usr/local/bin/
+        curl -LO "https://dl.k8s.io/release/v1.21.2/bin/linux/amd64/kubectl"
+        chmod +x ./kubectl
+        sudo mv ./kubectl /usr/local/bin/
+
+    # 5. Configure EKS authentication
+    - name: EKS Authentication
+      run: |
+        aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+
+    # 6. Set up Docker image repository and authentication with Amazon ECR
+    - name: Log in to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build Docker image
+      run: |
+        IMAGE_TAG="${{ inputs.microservice }}-${{ github.sha }}"
+        echo "Building Docker image for ${{ inputs.microservice }} with tag $IMAGE_TAG"
+        docker build -t $IMAGE_TAG ./App/${{ inputs.microservice }}
+
+    - name: Push Docker image to ECR
+      run: |
+        IMAGE_TAG="${{ inputs.microservice }}-${{ github.sha }}"
+        ECR_URI="${{ secrets.AWS_ECR_REPOSITORY_URL }}"
+        docker tag $IMAGE_TAG $ECR_URI:$IMAGE_TAG
+        docker push $ECR_URI:$IMAGE_TAG
+
+    # 7. Deploy using Kustomize and kubectl to EKS
+    - name: Build and Apply Kubernetes manifests using Kustomize
+      run: |
+        ENV_DIR=${{ inputs.environment }}
+        MICROSERVICE_DIR=App/${{ inputs.microservice }}
+        echo "Building Kubernetes manifests for $MICROSERVICE_DIR in $ENV_DIR environment"
+        kustomize build $ENV_DIR/$MICROSERVICE_DIR/kubernetes/ > $MICROSERVICE_DIR.yaml
+
+    - name: Apply Kubernetes manifests to EKS
+      run: |
+        kubectl apply -f $MICROSERVICE_DIR.yaml
+
+    # 8. Notify Deployment Success
+    - name: Deployment Success
+      run: |
+        echo "Successfully deployed ${{ inputs.microservice }} to ${{ inputs.environment }} environment on EKS."
